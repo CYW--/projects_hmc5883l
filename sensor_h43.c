@@ -14,7 +14,7 @@
 #define I2C_ADAPTER_ID 2
 
 #define SENSOR_ID_STRING "H43"
-#define SENSOR_NAME "hmc5883l"
+#define SENSOR_NAME "hmc5883l_test"
 #define SENSOR_SLAVE_ADDRESS 0x1E
 #define DRDY_INT GPIO1_16
 
@@ -215,7 +215,7 @@ static int hmc5883l_probe(struct i2c_client *client,
     s32 version_value;
 
     version_value = hmc5883l_get_version(client);
-    D("Chip version is %c\n", version_value & 0xff);
+    D("Chip version is 0x%X\n", version_value);
 
     return 0;
 }
@@ -248,23 +248,33 @@ static int __init hmc5883l_init(void)
 {
     struct i2c_adapter *adap;
     struct i2c_client *client;
-    i2c_register_driver(THIS_MODULE, &hmc5883l_driver);
+    int adap_num = 1;
 
-    D("i2c_register_drivers\n");
-    adap = i2c_get_adapter(1);
+    hmc5883l = kzalloc(sizeof(*hmc5883l), GFP_KERNEL);
+    if (!hmc5883l)
+        return -ENOMEM;
+
+    i2c_add_driver(&hmc5883l_driver);
+
+    adap = i2c_get_adapter(adap_num);
     if (!adap) {
-        E("E i2c adapter\n");
+        E("E i2c adapter %d\n", adap_num);
         return -ENODEV;
-    } else
+    } else {
+        D("Get Adapter %d\n", adap_num);
         client = i2c_new_device(adap, &hmc5883l_device);
+    }
 
     if (!client) {
-        E("E i2c client\n");
+        E("E i2c client %s @ %0x%02X\n", hmc5883l_device.type,
+                hmc5883l_device.addr);
         return -ENODEV;
-    } else
+    } else {
+        D("Client OK!\n");
         hmc5883l->client = client;
-
+    }
     D("INIT success!\n");
+    i2c_put_adapter(adap);
 
     return 0;
 }
@@ -274,6 +284,7 @@ static void __exit hmc5883l_exit(void)
     i2c_del_driver(&hmc5883l_driver);
     if (hmc5883l->client)
         i2c_unregister_device(hmc5883l->client);
+    D("Module removed\n");
 }
 
 module_init(hmc5883l_init);
