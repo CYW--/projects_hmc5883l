@@ -71,7 +71,7 @@ enum {
 #define HMC5883L_STATUS_REG      0x09
     #define DATA_LOCK       0x1
         #define DATA_LOCK_OFFSET 1
-    #define DATA_READY      1<0
+    #define DATA_READY      0x1
 
 #define HMC5883L_IDENTIFY_REG_A  0x0A
 #define HMC5883L_IDENTIFY_REG_B  0x0B
@@ -80,6 +80,7 @@ enum {
 struct sensor_hmc5883l {
     struct mutex lock;
     struct i2c_client *client;
+    struct work_struct work;
     u16 x_axis;
     u16 y_axis;
     u16 z_axis;
@@ -224,6 +225,7 @@ static s32 hmc5883l_get_version(struct i2c_client *client)
     s32 value_B = hmc5883l_read_byte(client, HMC5883L_IDENTIFY_REG_B);
     s32 value_C = hmc5883l_read_byte(client, HMC5883L_IDENTIFY_REG_C);
 
+    D("A=0x%X B=0x%X C=0x%X\n", value_A, value_B, value_C);
     s32 version = value_A & 0xff | value_B & 0xff << 8
         | value_C & 0xff << 16;
     return version;
@@ -233,16 +235,21 @@ static bool hmc5883l_is_data_ready(struct i2c_client *client)
 {
     s32 result;
     result = hmc5883l_read_byte(client, HMC5883L_STATUS_REG);
-    if (result & DATA_READY)
+    D("hmc5883l_is_data_ready: value = 0x%X\n", result & DATA_READY);
+    if (result & DATA_READY) {
+        D("D1111111\n");
         return true;
-    else
+    } else {
+        D("DDDDDDDDDDDD\n");
         return false;
+    }
 }
 
 static bool hmc5883l_is_reg_locked(struct i2c_client *client)
 {
     s32 result;
     result = hmc5883l_read_byte(client, HMC5883L_STATUS_REG);
+    D("hmc5883l_is_reg_locked: value = 0x%X\n", result >> DATA_LOCK_OFFSET & DATA_LOCK);
     if (result >> DATA_LOCK_OFFSET & DATA_LOCK)
         return true;
     else
@@ -251,19 +258,24 @@ static bool hmc5883l_is_reg_locked(struct i2c_client *client)
 
 static irqreturn_t hmc5883l_interrupt(int irq, void *dev_id)
 {
-    struct i2c_client *client = dev_id;
-
-    if (hmc5883l_is_data_ready(client) && hmc5883l_is_reg_locked(client)) {
-        hmc5883l->x_axis = hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG);
-        hmc5883l->y_axis = hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG);
-        hmc5883l->z_axis = hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG);
-        D("Date is ready 0x%04X 0x%04X 0x%04X\n", hmc5883l->x_axis,
-                hmc5883l->y_axis, hmc5883l->z_axis);
-    } else
-        D("Data not ready\n");
-
+    schedule_work(&hmc5883l->work);
     return IRQ_HANDLED;
 }
+
+static void hmc5883l_work_queue(struct work_struct *work)
+{
+    struct i2c_client *client = hmc5883l->client;
+
+    hmc5883l->x_axis = hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG) << 8
+        | hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 1);
+    hmc5883l->y_axis = hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 2) << 8
+        | hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 3);
+    hmc5883l->z_axis = hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 4) << 8
+        | hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 5);
+    D("0x%04X 0x%04X 0x%04X\n", hmc5883l->x_axis,
+            hmc5883l->y_axis, hmc5883l->z_axis);
+}
+
 
 static int hmc5883l_probe(struct i2c_client *client,
         const struct i2c_device_id *id)
@@ -282,12 +294,12 @@ static int hmc5883l_probe(struct i2c_client *client,
     hmc5883l_set_data_out_rate(client, hmc5883l->out_rate);
     hmc5883l_set_mesura(client, hmc5883l->mesura);
     hmc5883l_set_sample_average(client, hmc5883l->sample);
-
     D("irq number is %d\n", client->irq);
     ret = request_irq(client->irq, hmc5883l_interrupt,
-            IRQF_TRIGGER_RISING, "hmc5883l-i2c", (void*)client);
+            IRQF_TRIGGER_RISING, "hmc5883l-i2c", NULL);
     if (ret)
         E("IRQ request met err\n");
+    hmc5883l_get_version(client);
     return 0;
 }
 
@@ -319,12 +331,13 @@ static int __init hmc5883l_init(void)
 {
     struct i2c_adapter *adap;
     struct i2c_client *client;
-    int adap_num = 0;
+    int adap_num = 1;
 
     hmc5883l = kzalloc(sizeof(*hmc5883l), GFP_KERNEL);
     if (!hmc5883l)
         return -ENOMEM;
     mutex_init(&hmc5883l->lock);
+    INIT_WORK(&hmc5883l->work, hmc5883l_work_queue);
 
     i2c_add_driver(&hmc5883l_driver);
 
@@ -355,7 +368,7 @@ static int __init hmc5883l_init(void)
 static void __exit hmc5883l_exit(void)
 {
     i2c_del_driver(&hmc5883l_driver);
-    free_irq(hmc5883l->client->irq, (void*) hmc5883l->client);
+    free_irq(hmc5883l->client->irq, NULL);
     if (hmc5883l->client)
         i2c_unregister_device(hmc5883l->client);
     D("Module removed\n");
