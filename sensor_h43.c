@@ -8,6 +8,7 @@
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/types.h>
+#include <linux/delay.h>
 
 #include "log.h"
 
@@ -274,16 +275,61 @@ static void hmc5883l_work_queue(struct work_struct *work)
         | hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 5);
     D("0x%04X 0x%04X 0x%04X\n", hmc5883l->x_axis,
             hmc5883l->y_axis, hmc5883l->z_axis);
+#if 0
+    if (hmc5883l->x_axis > 0xF800 || hmc5883l->y_axis > 0xF800
+            || hmc5883l->z_axis > 0xF800) {
+        if (hmc5883l->gain < 8) {
+            hmc5883l->gain++;
+            D("Gain too large, gain => %d\n", hmc5883l->gain);
+            hmc5883l_set_gain(client, hmc5883l->gain);
+        }
+    } else if (hmc5883l->x_axis < 0x07FF || hmc5883l->y_axis < 0x07FF
+            || hmc5883l->z_axis < 0x07FF) {
+        if (hmc5883l->gain > 0) {
+            hmc5883l->gain--;
+            D("Gain too little, gain => %d\n", hmc5883l->gain);
+            hmc5883l_set_gain(client, hmc5883l->gain);
+        }
+    }
+#endif
 }
 
+static void do_self_test(struct i2c_client *client)
+{
+    hmc5883l->mesura = 0;
+    hmc5883l_set_mesura(client, hmc5883l->mesura);
+    D("Self-test No.1\n");
+    hmc5883l->x_axis = hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG) << 8
+        | hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 1);
+    hmc5883l->y_axis = hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 2) << 8
+        | hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 3);
+    hmc5883l->z_axis = hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 4) << 8
+        | hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 5);
+    D("0x%04X 0x%04X 0x%04X\n", hmc5883l->x_axis,
+            hmc5883l->y_axis, hmc5883l->z_axis);
+    mdelay(100);
+    hmc5883l->mesura = 1;
+    hmc5883l_set_mesura(client, hmc5883l->mesura);
+    hmc5883l_set_mode(client, 0x01);
+    D("Self-test No.2\n");
+    hmc5883l->x_axis = hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG) << 8
+        | hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 1);
+    hmc5883l->y_axis = hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 2) << 8
+        | hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 3);
+    hmc5883l->z_axis = hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 4) << 8
+        | hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 5);
+    D("0x%04X 0x%04X 0x%04X\n", hmc5883l->x_axis,
+            hmc5883l->y_axis, hmc5883l->z_axis);
+}
 
 static int hmc5883l_probe(struct i2c_client *client,
         const struct i2c_device_id *id)
 {
     int ret;
+    do_self_test(client);
     hmc5883l->mesura = NORMAL_MESURA;
     hmc5883l->gain = 0x01;
-    hmc5883l->mode = CONTINOUS_MODE;
+    hmc5883l->mode = SINGLE_MODE; //CONTINOUS_MODE;
     hmc5883l->out_rate = 0x04;
     hmc5883l->sample = 0x03;
 
