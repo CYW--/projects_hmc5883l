@@ -82,6 +82,8 @@ struct sensor_hmc5883l {
     struct mutex lock;
     struct i2c_client *client;
     struct work_struct work;
+    struct completion wait;
+    bool is_self_test;
     u16 x_axis;
     u16 y_axis;
     u16 z_axis;
@@ -259,7 +261,12 @@ static bool hmc5883l_is_reg_locked(struct i2c_client *client)
 
 static irqreturn_t hmc5883l_interrupt(int irq, void *dev_id)
 {
+    if (hmc5883l->is_self_test) {
+        complete(&hmc5883l->wait);
+        goto out;
+    }
     schedule_work(&hmc5883l->work);
+out:
     return IRQ_HANDLED;
 }
 
@@ -296,55 +303,58 @@ static void hmc5883l_work_queue(struct work_struct *work)
 
 static void do_self_test(struct i2c_client *client)
 {
-    hmc5883l->mesura = 0;
-    hmc5883l_set_mesura(client, hmc5883l->mesura);
-    D("Self-test No.1\n");
-    hmc5883l->x_axis = hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG) << 8
-        | hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 1);
-    hmc5883l->y_axis = hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 2) << 8
-        | hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 3);
-    hmc5883l->z_axis = hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 4) << 8
-        | hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 5);
-    D("0x%04X 0x%04X 0x%04X\n", hmc5883l->x_axis,
-            hmc5883l->y_axis, hmc5883l->z_axis);
-    mdelay(100);
-    hmc5883l->mesura = 1;
-    hmc5883l_set_mesura(client, hmc5883l->mesura);
-    hmc5883l_set_mode(client, 0x01);
-    D("Self-test No.2\n");
-    hmc5883l->x_axis = hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG) << 8
-        | hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 1);
-    hmc5883l->y_axis = hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 2) << 8
-        | hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 3);
-    hmc5883l->z_axis = hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 4) << 8
-        | hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 5);
-    D("0x%04X 0x%04X 0x%04X\n", hmc5883l->x_axis,
-            hmc5883l->y_axis, hmc5883l->z_axis);
+    unsigned long timeout;
+    int i = 0;
+
+    hmc5883l->is_self_test = true;
+    hmc5883l_write_byte(client, 0x00, 0x71);
+    hmc5883l_write_byte(client, 0x01, 0xA0);
+    hmc5883l_write_byte(client, 0x02, 0x00);
+
+    for (i = 0; i < 3; i++) {
+        timeout = wait_for_completion_timeout(&hmc5883l->wait, HZ);
+        if (timeout <= 0) {
+            E("self test timeout\n");
+            return;
+        }
+
+        hmc5883l->x_axis = hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG) << 8
+            | hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 1);
+        hmc5883l->y_axis = hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 2) << 8
+            | hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 3);
+        hmc5883l->z_axis = hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 4) << 8
+            | hmc5883l_read_byte(client, HMC5883L_DATA_OUT_REG + 5);
+        D("0x%04X 0x%04X 0x%04X\n", hmc5883l->x_axis,
+                hmc5883l->y_axis, hmc5883l->z_axis);
+        hmc5883l_write_byte(client, 0x03, 0x00);
+    }
+
+    hmc5883l->is_self_test = false;
+    hmc5883l_set_mode(client, IDLE_MODE);
 }
 
 static int hmc5883l_probe(struct i2c_client *client,
         const struct i2c_device_id *id)
 {
     int ret;
+    i2c_set_clientdata(client, hmc5883l);
+    ret = request_irq(client->irq, hmc5883l_interrupt,
+            IRQF_TRIGGER_RISING, "hmc5883l-i2c", NULL);
+    if (ret)
+        E("IRQ request met err\n");
+
     do_self_test(client);
     hmc5883l->mesura = NORMAL_MESURA;
     hmc5883l->gain = 0x01;
-    hmc5883l->mode = SINGLE_MODE; //CONTINOUS_MODE;
+    hmc5883l->mode = CONTINOUS_MODE;
     hmc5883l->out_rate = 0x04;
     hmc5883l->sample = 0x03;
-
-    i2c_set_clientdata(client, hmc5883l);
 
     hmc5883l_set_mode(client, hmc5883l->mode);
     hmc5883l_set_gain(client, hmc5883l->gain);
     hmc5883l_set_data_out_rate(client, hmc5883l->out_rate);
     hmc5883l_set_mesura(client, hmc5883l->mesura);
     hmc5883l_set_sample_average(client, hmc5883l->sample);
-    D("irq number is %d\n", client->irq);
-    ret = request_irq(client->irq, hmc5883l_interrupt,
-            IRQF_TRIGGER_RISING, "hmc5883l-i2c", NULL);
-    if (ret)
-        E("IRQ request met err\n");
     hmc5883l_get_version(client);
     return 0;
 }
@@ -384,6 +394,8 @@ static int __init hmc5883l_init(void)
         return -ENOMEM;
     mutex_init(&hmc5883l->lock);
     INIT_WORK(&hmc5883l->work, hmc5883l_work_queue);
+    init_completion(&hmc5883l->wait);
+    hmc5883l->is_self_test = false;
 
     i2c_add_driver(&hmc5883l_driver);
 
