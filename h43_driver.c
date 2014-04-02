@@ -339,7 +339,7 @@ static int hmc5883l_probe(struct i2c_client *client,
     u8 id1, id2, id3;
     D("Probe match, id name %s\n", id->name);
 
-    if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
+    if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C|I2C_FUNC_SMBUS_READ_BLOCK_DATA)) {
         E("i2c_check_functionality error\n");
         ret = -EINVAL;
         goto out;
